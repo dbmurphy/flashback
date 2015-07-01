@@ -10,7 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"strings"
+	"regexp"
 	"github.com/ParsePlatform/flashback"
 	"gopkg.in/mgo.v2"
 )
@@ -20,6 +21,8 @@ func panicOnError(err error) {
 		panic(err)
 	}
 }
+// Document represents the json-like infromation
+type Document map[string]interface{}
 
 var (
 	maxOps                   int
@@ -45,6 +48,10 @@ var (
 	challengerStatsFilename3 string
 	opFilter                 string
 	speedup                  float64
+	auth			 bool
+	authdb			 string
+	username		 string
+	password		 string
 )
 
 const (
@@ -176,12 +183,12 @@ func parseFlags() error {
 	}
 	return nil
 }
-function parseURI( url string, auth bool, authdb string, username string, password string){
-	var host = ""
-	authDoc Document := {}
+func parseURI( url string, auth bool, authdb string, username string, password string) Document{
+	var host string
+	var authDoc Document
 	//Detect if auth is disable but  URI uses auth
-	if auth == false && regexp.MustCompile(url,`.*:.*@.*`) {
-		auth := true
+	if  re, _ := regexp.Compile(".*:.*@.*");re.MatchString(url){
+		auth = true
 	}
 	// Empty password and username but auth enabled, extract from URI
 	if auth == true && (username == "" && password == "") {
@@ -189,56 +196,48 @@ function parseURI( url string, auth bool, authdb string, username string, passwo
 		s := strings.Split(url, "@")
 		userpass, host := s[0], s[1]
 		//Break user:pass into username,password
-		s :=  strings.Sprit(userpass,":")
-		username , password := s[0],s[1]
+		s =  strings.Split(userpass,":")
+		username , password = s[0],s[1]
 		//Break host:port/db into  host:port,db
-		i, err := strings.Index(host, "/")
-		if err != nil {
-			authdb := host[i+1]
-			host   := host[:i]
+		i := strings.Index(host, "/")
+		if i != -1  {
+			authdb = host[i+1:]
+			host   = host[:i]
 		}
-		authDoc Document := {
-			username	: username
-			password	: password
-			host		: host
-			authdb		: authdb
-		}
-	}else if auth == true && ( username != "" && password != ""){
-		authDoc Document := {
-			username	: username
-			password	: password
-			host		: host
-			authdb		: authdb
-		}
-	}
-	else{	authDoc Document = {host: host} }
-	return authDoc 
+		authDoc["username"] = username
+		authDoc["password"] = password
+		authDoc["host"] = host
+		authDoc["authdb"] = authdb
+	}else if auth == true &&  username != "" && password != ""{
+		authDoc["username"] = username
+                authDoc["password"] = password
+                authDoc["host"] = host
+                authDoc["authdb"] = authdb
+	}else{	authDoc["host"]  =  host }
+	return authDoc
 
 }
 
-function connect_mongo(authDoc Document,socketTimeout int64){
-	mongoDBDialInfo Document = {}
-	if value, ok := authDoc["username"]; ok {
+func connect_mongo(authDoc Document,socketTimeout int64) (*mgo.Session, error) {
+	var mongoDBDialInfo  *mgo.DialInfo
+	if _username, ok := authDoc["username"]; ok {
 		// We need this object to establish a session to our MongoDB.
-		mongoDBDialInfo := &mgo.DialInfo{
-			Addrs:    []string{authDoc["host"]},
+		mongoDBDialInfo = &mgo.DialInfo{
+			Addrs:    []string{authDoc["host"].(string)},
 			Timeout:  time.Duration(socketTimeout),
-			Database: authDoc["authdb"],
-			Username: authDoc["username"],
-			Password: authDoc["password"],
+			Database: authDoc["authdb"].(string),
+			Username: _username.(string),
+			Password: authDoc["password"].(string),
 		}
 	}else{
-		mongoDBDialInfo := &mgo.DialInfo{
-			Addrs:    []string{authDoc["host"]},
-			Timeout:  time.Duration(socketTimeout)
-
+		mongoDBDialInfo = &mgo.DialInfo{
+			Addrs:    []string{authDoc["host"].(string)},
+			Timeout:  time.Duration(socketTimeout),
 		}
 	}
-
-    	session, err := mgo.DialWithInfo(mongoDBDialInfo)
-		panicOnError(err)
-		return session, err
-
+	session, err := mgo.DialWithInfo(mongoDBDialInfo)
+	panicOnError(err)
+	return session,err
 }
 
 func makeOpsChan(style string, opsFilename string, logger *flashback.Logger) (chan *flashback.Op, error) {
@@ -353,7 +352,7 @@ func main() {
 
 		for i, n := range nodes {
 			authDoc := parseURI(url,auth, authdb, username, password)
-			session, err := mgo.connect_mongo(authDoc,socketTimeout)
+			session, err := connect_mongo(authDoc,socketTimeout)
 			panicOnError(err)
 			defer session.Close()
 			workerStates[i] = nodeWorkerState{
