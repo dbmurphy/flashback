@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"github.com/ParsePlatform/flashback"
 	"gopkg.in/mgo.v2"
+	"github.com/kr/pretty"
 )
 
 func panicOnError(err error) {
@@ -161,6 +162,22 @@ func init() {
 		"op_filter",
 		"",
 		"[Optional] If specified, we'll only execute ops of that particular type")
+        flag.BoolVar(&auth,
+                "auth",
+                false,
+                "[Optional] Enables authentications for non-URI mode, auto enabled on URI Auth detection.")
+	flag.StringVar(&authdb,
+		"authdb",
+		"",
+		"[Optional] Database to authenticate against, user:pass@host:port/DB will have DB set this.")
+	flag.StringVar(&username,
+		"username",
+		"",
+		"[Optional] Username to authenticate as (requires matching password), pulled from user:pass@host in Mongo URI.")
+	flag.StringVar(&password,
+		"password",
+		"",
+		"[Optional] Password to authenticate as (requires matching username), pulled from user:pass@host in Mongo URI.")
 }
 
 func parseFlags() error {
@@ -177,6 +194,15 @@ func parseFlags() error {
 	if maxOps == 0 {
 		maxOps = math.MaxUint32
 	}
+	if auth == true {
+		if len(username) != 0  && len(password) == 0 {
+			return errors.New("Auth argument detected but password was invalid")
+		}else if len(username) == 0 && len(password) != 0 {
+			return errors.New("Auth argument detected but username was invalid")
+		}else if len(username) == 0 && len(password) == 0 {
+			return errors.New("Auth argument detected but username and password are invalid")
+		}
+	}
 	var err error
 	if logger, err = flashback.NewLogger(stdout, stderr); err != nil {
 		return err
@@ -184,40 +210,53 @@ func parseFlags() error {
 	return nil
 }
 func parseURI( url string, auth bool, authdb string, username string, password string) Document{
-	var host string
-	var authDoc Document
+        var host string
+	var userpass string
+        var authDoc Document
 	//Detect if auth is disable but  URI uses auth
-	if  re, _ := regexp.Compile(".*:.*@.*");re.MatchString(url){
-		auth = true
-	}
-	// Empty password and username but auth enabled, extract from URI
+        if  re, _ := regexp.Compile(".*:.*@.*");re.MatchString(url){
+                auth = true
+        }
+        //Break user:pass@host:port/db int user:pass ,  host:port/db
+        s := strings.Split(url, "@")
+        if len(s) >  1 {
+                userpass, host = s[0], s[1]
+                //Break user:pass into username,password
+                s =  strings.Split(userpass,":")
+                if len(s) > 1 {
+                        new_username , new_password := s[0],s[1]
+                        if len(username) == 0 {
+                                username = new_username
+                        }
+                        if len(password) == 0 {
+                                password = new_password
+                        }
+                }
+                //Break host:port/db into  host:port,db
+                i := strings.Index(host, "/")
+                if i != -1  {
+                        authdb = host[i+1:]
+                        host   = host[:i]
+                }
+        }else{host = url}
 	if auth == true && (username == "" && password == "") {
-		//Break user:pass@host:port/db int user:pass ,  host:port/db
-		s := strings.Split(url, "@")
-		userpass, host := s[0], s[1]
-		//Break user:pass into username,password
-		s =  strings.Split(userpass,":")
-		username , password = s[0],s[1]
-		//Break host:port/db into  host:port,db
-		i := strings.Index(host, "/")
-		if i != -1  {
-			authdb = host[i+1:]
-			host   = host[:i]
-		}
-		authDoc["username"] = username
-		authDoc["password"] = password
-		authDoc["host"] = host
-		authDoc["authdb"] = authdb
-	}else if auth == true &&  username != "" && password != ""{
-		authDoc["username"] = username
-                authDoc["password"] = password
-                authDoc["host"] = host
-                authDoc["authdb"] = authdb
-	}else{	authDoc["host"]  =  host }
-	return authDoc
+                authDoc = Document {
+                        "username"      : username,
+                        "password"      : password,
+                        "host"          : host,
+                        "authdb"        : authdb,
+                }
+        }else if auth == true &&  username != "" && password != ""{
+                authDoc = Document {
+                        "username"      : username,
+                        "password"      : password,
+                        "host"          : host,
+                        "authdb"        : authdb,
+                }
+        }else{  authDoc = Document { "host" : url }}
+        return authDoc
 
 }
-
 func connect_mongo(authDoc Document,socketTimeout int64) (*mgo.Session, error) {
 	var mongoDBDialInfo  *mgo.DialInfo
 	if _username, ok := authDoc["username"]; ok {
@@ -235,7 +274,11 @@ func connect_mongo(authDoc Document,socketTimeout int64) (*mgo.Session, error) {
 			Timeout:  time.Duration(socketTimeout),
 		}
 	}
+	fmt.Printf("%# v", pretty.Formatter(authDoc))
 	session, err := mgo.DialWithInfo(mongoDBDialInfo)
+	if err != nil {
+		fmt.Printf("CreateSession: %s\n", err)
+	}
 	panicOnError(err)
 	return session,err
 }
